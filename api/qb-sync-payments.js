@@ -105,4 +105,4 @@ module.exports = async function handler(req, res) {
     result.error = error.message;
     return res.status(200).json(result);
   }
-};
+}; 
