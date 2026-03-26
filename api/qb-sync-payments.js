@@ -1,123 +1,109 @@
-// /api/qb-sync-payments.js — Vercel Serverless Function (Cron)
-// Checks QuickBooks for paid invoices and syncs status back to portal
-// Cron: every hour — vercel.json: { "path": "/api/qb-sync-payments", "schedule": "0 * * * *" }
- 
 module.exports = async function handler(req, res) {
   var supabaseUrl = process.env.SUPABASE_URL;
   var supabaseKey = process.env.SUPABASE_SERVICE_KEY;
  
   if (!supabaseUrl || !supabaseKey) {
-    return res.status(500).json({ error: "Missing SUPABASE env vars" });
+    return res.status(500).json({ error: "Missing SUPABASE env vars", hasUrl: !!supabaseUrl, hasKey: !!supabaseKey });
   }
  
-  var headers = {
-    "apikey": supabaseKey,
-    "Authorization": "Bearer " + supabaseKey,
-    "Content-Type": "application/json"
-  };
+  var result = { step: "start", supabaseUrl: supabaseUrl.substring(0, 30) + "..." };
  
   try {
-    // 1. Read portal data from Supabase portal_data table
     var fetchUrl = supabaseUrl + "/rest/v1/portal_data?key=eq.opc-wms-shared&select=key,value";
-    var dataRes = await fetch(fetchUrl, { headers: headers });
+    result.step = "fetching";
+    result.fetchUrl = fetchUrl;
     
+    var dataRes = await fetch(fetchUrl, {
+      headers: {
+        "apikey": supabaseKey,
+        "Authorization": "Bearer " + supabaseKey,
+        "Content-Type": "application/json"
+      }
+    });
+ 
+    result.step = "fetched";
+    result.httpStatus = dataRes.status;
+ 
     if (!dataRes.ok) {
-      var errText = await dataRes.text();
-      return res.status(500).json({ error: "Supabase fetch failed", status: dataRes.status, detail: errText });
+      result.error = await dataRes.text();
+      return res.status(200).json(result);
     }
  
     var rows = await dataRes.json();
+    result.step = "parsed";
+    result.rowCount = rows ? rows.length : 0;
  
     if (!rows || rows.length === 0) {
-      return res.status(200).json({ skipped: true, reason: "No portal data found in Supabase", rowCount: rows ? rows.length : 0 });
+      result.error = "No rows found";
+      return res.status(200).json(result);
     }
  
-    var data;
-    try {
-      data = JSON.parse(rows[0].value);
-    } catch (e) {
-      return res.status(500).json({ error: "Failed to parse portal data", parseError: e.message });
-    }
+    var data = JSON.parse(rows[0].value);
+    result.step = "dataParsed";
+    result.keys = Object.keys(data).filter(function(k) { return k.indexOf("qb") === 0; });
+    result.qbConnected = data.qbConnected || false;
+    result.hasAccessToken = !!(data.qbAccessToken);
+    result.tokenLength = (data.qbAccessToken || "").length;
+    result.realmId = data.qbRealmId || "NOT SET";
+    result.billCount = (data.bills || []).length;
  
     var qbAccessToken = data.qbAccessToken || "";
     var qbRealmId = data.qbRealmId || "";
-    var qbConnected = data.qbConnected || false;
-    var bills = data.bills || [];
  
     if (!qbAccessToken || !qbRealmId) {
-      return res.status(200).json({ 
-        skipped: true, 
-        reason: "QuickBooks not connected",
-        debug: {
-          qbConnected: qbConnected,
-          hasAccessToken: !!qbAccessToken,
-          tokenLength: qbAccessToken.length,
-          hasRealmId: !!qbRealmId,
-          realmId: qbRealmId,
-          billCount: bills.length
-        }
-      });
+      result.status = "QB not connected";
+      return res.status(200).json(result);
     }
  
-    // 2. Find invoices pushed to QB but not yet paid in portal
+    var bills = data.bills || [];
     var pendingInPortal = bills.filter(function(b) {
       return (b.st === "Synced" || b.st === "Pending") && b.qbInvoiceId;
     });
  
+    result.status = "QB connected";
+    result.pendingToCheck = pendingInPortal.length;
+ 
     if (pendingInPortal.length === 0) {
-      return res.status(200).json({ checked: 0, updated: 0, message: "No synced invoices to check", totalBills: bills.length, qbConnected: true });
+      result.message = "No invoices with qbInvoiceId to check";
+      return res.status(200).json(result);
     }
  
     var updated = 0;
- 
     for (var i = 0; i < pendingInPortal.length; i++) {
       var bill = pendingInPortal[i];
       try {
         var qbRes = await fetch(
           "https://quickbooks.api.intuit.com/v3/company/" + qbRealmId + "/invoice/" + bill.qbInvoiceId + "?minorversion=65",
-          {
-            headers: {
-              "Authorization": "Bearer " + qbAccessToken,
-              "Accept": "application/json"
-            }
-          }
+          { headers: { "Authorization": "Bearer " + qbAccessToken, "Accept": "application/json" } }
         );
- 
         if (qbRes.ok) {
           var qbData = await qbRes.json();
-          var qbInvoice = qbData.Invoice;
- 
-          if (qbInvoice && qbInvoice.Balance === 0 && qbInvoice.TotalAmt > 0) {
+          if (qbData.Invoice && qbData.Invoice.Balance === 0 && qbData.Invoice.TotalAmt > 0) {
             bill.st = "Paid";
             bill.paidDate = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
             bill.paidVia = "QuickBooks Auto-Sync";
             updated++;
           }
         }
-      } catch (e) {
-        console.error("[QB Sync] Error checking invoice " + bill.inv + ":", e.message);
-      }
+      } catch (e) {}
     }
  
-    // 3. Save updated bills back to Supabase if any changed
     if (updated > 0) {
       data.bills = bills;
       data._rev = Date.now();
       await fetch(supabaseUrl + "/rest/v1/portal_data?key=eq.opc-wms-shared", {
         method: "PATCH",
-        headers: headers,
+        headers: { "apikey": supabaseKey, "Authorization": "Bearer " + supabaseKey, "Content-Type": "application/json" },
         body: JSON.stringify({ value: JSON.stringify(data) })
       });
     }
  
-    return res.status(200).json({
-      checked: pendingInPortal.length,
-      updated: updated,
-      timestamp: new Date().toISOString()
-    });
+    result.checked = pendingInPortal.length;
+    result.updated = updated;
+    return res.status(200).json(result);
   } catch (error) {
-    console.error("[QB Sync] Error:", error.message || error);
-    return res.status(500).json({ error: error.message || "Sync failed" });
+    result.error = error.message;
+    return res.status(200).json(result);
   }
 };
  
