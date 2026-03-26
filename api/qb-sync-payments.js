@@ -18,28 +18,45 @@ module.exports = async function handler(req, res) {
  
   try {
     // 1. Read portal data from Supabase portal_data table
-    var dataRes = await fetch(supabaseUrl + "/rest/v1/portal_data?key=eq.opc-wms-shared&select=key,value", {
-      headers: headers
-    });
+    var fetchUrl = supabaseUrl + "/rest/v1/portal_data?key=eq.opc-wms-shared&select=key,value";
+    var dataRes = await fetch(fetchUrl, { headers: headers });
+    
+    if (!dataRes.ok) {
+      var errText = await dataRes.text();
+      return res.status(500).json({ error: "Supabase fetch failed", status: dataRes.status, detail: errText });
+    }
+ 
     var rows = await dataRes.json();
  
     if (!rows || rows.length === 0) {
-      return res.status(200).json({ skipped: true, reason: "No portal data found in Supabase" });
+      return res.status(200).json({ skipped: true, reason: "No portal data found in Supabase", rowCount: rows ? rows.length : 0 });
     }
  
     var data;
     try {
       data = JSON.parse(rows[0].value);
     } catch (e) {
-      return res.status(500).json({ error: "Failed to parse portal data" });
+      return res.status(500).json({ error: "Failed to parse portal data", parseError: e.message });
     }
  
-    var bills = data.bills || [];
     var qbAccessToken = data.qbAccessToken || "";
     var qbRealmId = data.qbRealmId || "";
+    var qbConnected = data.qbConnected || false;
+    var bills = data.bills || [];
  
     if (!qbAccessToken || !qbRealmId) {
-      return res.status(200).json({ skipped: true, reason: "QuickBooks not connected" });
+      return res.status(200).json({ 
+        skipped: true, 
+        reason: "QuickBooks not connected",
+        debug: {
+          qbConnected: qbConnected,
+          hasAccessToken: !!qbAccessToken,
+          tokenLength: qbAccessToken.length,
+          hasRealmId: !!qbRealmId,
+          realmId: qbRealmId,
+          billCount: bills.length
+        }
+      });
     }
  
     // 2. Find invoices pushed to QB but not yet paid in portal
@@ -48,7 +65,7 @@ module.exports = async function handler(req, res) {
     });
  
     if (pendingInPortal.length === 0) {
-      return res.status(200).json({ checked: 0, updated: 0, message: "No synced invoices to check" });
+      return res.status(200).json({ checked: 0, updated: 0, message: "No synced invoices to check", totalBills: bills.length, qbConnected: true });
     }
  
     var updated = 0;
@@ -103,3 +120,4 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: error.message || "Sync failed" });
   }
 };
+ 
