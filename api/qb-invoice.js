@@ -115,20 +115,44 @@ module.exports = async function handler(req, res) {
     }
 
     // 2. Build line items
-    var lineItems = (body.line_items || []).map(function(item) {
-      var amt = item.amount || (item.qty * item.price) || 0;
-      return {
-        DetailType: "SalesItemLineDetail",
-        Amount: Math.round(amt * 100) / 100,
-        Description: item.description || item.name || "",
-        SalesItemLineDetail: {
-          UnitPrice: Math.round((item.price || 0) * 100) / 100,
-          Quantity: item.qty || 1
+    // First, find or create a "Services" item in QB for line items
+    var serviceItemId = null;
+    try {
+      var itemQuery = encodeURIComponent("SELECT * FROM Item WHERE Name = 'Services' AND Type = 'Service'");
+      var itemRes = await fetch(baseUrl + "/query?query=" + itemQuery, { headers: headers });
+      var itemData = await itemRes.json();
+      if (itemData.QueryResponse && itemData.QueryResponse.Item && itemData.QueryResponse.Item.length > 0) {
+        serviceItemId = itemData.QueryResponse.Item[0].Id;
+      } else {
+        // Try to find any service item
+        var anyQuery = encodeURIComponent("SELECT * FROM Item WHERE Type = 'Service' MAXRESULTS 1");
+        var anyRes = await fetch(baseUrl + "/query?query=" + anyQuery, { headers: headers });
+        var anyData = await anyRes.json();
+        if (anyData.QueryResponse && anyData.QueryResponse.Item && anyData.QueryResponse.Item.length > 0) {
+          serviceItemId = anyData.QueryResponse.Item[0].Id;
         }
+      }
+    } catch (e) {}
+
+    var lineItems = (body.line_items || []).map(function(item) {
+      var amt = Math.round((item.amount || (item.qty * item.price) || 0) * 100) / 100;
+      var line = {
+        DetailType: "SalesItemLineDetail",
+        Amount: amt,
+        Description: item.description || item.name || ""
       };
+      var detail = {
+        UnitPrice: Math.round((item.price || 0) * 100) / 100,
+        Qty: item.qty || 1
+      };
+      if (serviceItemId) {
+        detail.ItemRef = { value: String(serviceItemId) };
+      }
+      line.SalesItemLineDetail = detail;
+      return line;
     });
     if (lineItems.length === 0) {
-      lineItems = [{ DetailType: "SalesItemLineDetail", Amount: 0, Description: "Service", SalesItemLineDetail: { Quantity: 1, UnitPrice: 0 } }];
+      lineItems = [{ DetailType: "SalesItemLineDetail", Amount: 0, Description: "Service", SalesItemLineDetail: { Qty: 1, UnitPrice: 0 } }];
     }
 
     // 3. Create invoice - minimal payload
