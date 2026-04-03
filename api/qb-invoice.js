@@ -82,6 +82,64 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: true, detail: JSON.stringify(voidData) });
     }
 
+    // === ACTION: UPDATE INVOICE ===
+    if (action === "update") {
+      var updateId = body.invoice_id;
+      if (!updateId) return res.status(400).json({ error: true, detail: "Missing invoice_id" });
+
+      // Get current invoice for SyncToken
+      var getUpdRes = await fetch(baseUrl + "/invoice/" + updateId, { headers: headers });
+      var getUpdData = await getUpdRes.json();
+      if (!getUpdData.Invoice) return res.status(400).json({ error: true, detail: "Invoice not found in QB" });
+
+      // Load QB items for matching
+      var updQbItems = [];
+      try {
+        var updItemsQuery = encodeURIComponent("SELECT * FROM Item WHERE Type IN ('Service','NonInventory') MAXRESULTS 1000");
+        var updItemsRes = await fetch(baseUrl + "/query?query=" + updItemsQuery, { headers: headers });
+        var updItemsData = await updItemsRes.json();
+        if (updItemsData.QueryResponse && updItemsData.QueryResponse.Item) updQbItems = updItemsData.QueryResponse.Item;
+      } catch (e) {}
+
+      function findUpdItem(name) {
+        if (!name || updQbItems.length === 0) return null;
+        var lower = name.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+        for (var i = 0; i < updQbItems.length; i++) {
+          var qbLower = updQbItems[i].Name.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+          if (lower === qbLower || lower.indexOf(qbLower) >= 0 || qbLower.indexOf(lower) >= 0) return updQbItems[i];
+        }
+        return null;
+      }
+
+      var updLines = (body.line_items || []).map(function(item) {
+        var amt = Math.round((item.amount || (item.qty * item.price) || 0) * 100) / 100;
+        var detail = { UnitPrice: Math.round((item.price || 0) * 100) / 100, Qty: item.qty || 1 };
+        var matched = findUpdItem(item.qbItem || item.name || item.description || "");
+        if (matched) detail.ItemRef = { value: String(matched.Id), name: matched.Name };
+        return { DetailType: "SalesItemLineDetail", Amount: amt, Description: item.description || item.name || "", SalesItemLineDetail: detail };
+      });
+
+      var updateBody = {
+        Id: String(updateId),
+        SyncToken: getUpdData.Invoice.SyncToken,
+        CustomerRef: getUpdData.Invoice.CustomerRef,
+        Line: updLines,
+        sparse: true
+      };
+      if (body.due_date) {
+        var udd = new Date(body.due_date);
+        if (!isNaN(udd)) updateBody.DueDate = udd.toISOString().slice(0, 10);
+      }
+      if (body.memo) updateBody.CustomerMemo = { value: String(body.memo).slice(0, 1000) };
+
+      var updateRes = await fetch(baseUrl + "/invoice", { method: "POST", headers: headers, body: JSON.stringify(updateBody) });
+      var updateData = await updateRes.json();
+      if (updateData.Invoice) {
+        return res.status(200).json({ success: true, invoice_id: updateData.Invoice.Id, doc_number: updateData.Invoice.DocNumber, total: updateData.Invoice.TotalAmt });
+      }
+      return res.status(400).json({ error: true, detail: updateData.Fault ? updateData.Fault.Error.map(function(e) { return e.Message + " | " + (e.Detail || "") }).join("; ") : JSON.stringify(updateData) });
+    }
+
     // === ACTION: CREATE INVOICE (default) ===
     // 1. Find or create customer
     var customerName = body.customer_name || "Unknown Client";
