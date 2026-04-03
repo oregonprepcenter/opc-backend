@@ -107,11 +107,15 @@ module.exports = async function handler(req, res) {
 
     // 2. Build line items
     var lineItems = (body.line_items || []).map(function(item) {
+      var amt = item.amount || (item.qty * item.price) || 0;
       return {
         DetailType: "SalesItemLineDetail",
-        Amount: item.amount || (item.qty * item.price) || 0,
+        Amount: Math.round(amt * 100) / 100,
         Description: item.description || item.name || "",
-        SalesItemLineDetail: { Quantity: item.qty || 1, UnitPrice: item.price || item.amount || 0 }
+        SalesItemLineDetail: {
+          UnitPrice: Math.round((item.price || 0) * 100) / 100,
+          Quantity: item.qty || 1
+        }
       };
     });
     if (lineItems.length === 0) {
@@ -120,10 +124,10 @@ module.exports = async function handler(req, res) {
 
     // 3. Create invoice
     var invoiceBody = {
-      CustomerRef: { value: customerId },
+      CustomerRef: { value: String(customerId) },
       Line: lineItems,
-      DocNumber: body.invoice_number || undefined,
-      DueDate: body.due_date || undefined,
+      DocNumber: body.invoice_number ? String(body.invoice_number).slice(0,21) : undefined,
+      DueDate: (function(){if(!body.due_date)return undefined;var d=new Date(body.due_date);if(isNaN(d))return undefined;return d.toISOString().slice(0,10)})(),
       CustomerMemo: body.memo ? { value: body.memo } : undefined
     };
     Object.keys(invoiceBody).forEach(function(k) { if (invoiceBody[k] === undefined) delete invoiceBody[k]; });
