@@ -87,7 +87,16 @@ module.exports = async function handler(req, res) {
     var customerName = body.customer_name || "Unknown Client";
     var customerQuery = encodeURIComponent("SELECT * FROM Customer WHERE DisplayName = '" + customerName.replace(/'/g, "\\'") + "'");
     var custRes = await fetch(baseUrl + "/query?query=" + customerQuery, { headers: headers });
-    var custData = await custRes.json();
+    var custText = await custRes.text();
+    var custData;
+    try { custData = JSON.parse(custText); } catch(e) {
+      return res.status(400).json({ error: true, detail: "QB customer query failed: " + custText.slice(0, 500) });
+    }
+    if (custData.fault || custData.Fault) {
+      var faultErr = (custData.Fault || custData.fault);
+      var errMsg = faultErr.Error ? faultErr.Error.map(function(e){ return e.message || e.Message }).join("; ") : JSON.stringify(faultErr);
+      return res.status(400).json({ error: true, detail: errMsg });
+    }
 
     var customerId;
     if (custData.QueryResponse && custData.QueryResponse.Customer && custData.QueryResponse.Customer.length > 0) {
@@ -101,7 +110,7 @@ module.exports = async function handler(req, res) {
       if (newCustData.Customer) {
         customerId = newCustData.Customer.Id;
       } else {
-        return res.status(400).json({ error: true, detail: "Failed to create customer: " + JSON.stringify(newCustData) });
+        return res.status(400).json({ error: true, detail: "Failed to create customer: " + JSON.stringify(newCustData), sent_customer: customerName });
       }
     }
 
@@ -122,21 +131,33 @@ module.exports = async function handler(req, res) {
       lineItems = [{ DetailType: "SalesItemLineDetail", Amount: 0, Description: "Service", SalesItemLineDetail: { Quantity: 1, UnitPrice: 0 } }];
     }
 
-    // 3. Create invoice
+    // 3. Create invoice - minimal payload
     var invoiceBody = {
       CustomerRef: { value: String(customerId) },
-      Line: lineItems,
-      DocNumber: body.invoice_number ? String(body.invoice_number).slice(0,21) : undefined,
-      DueDate: (function(){if(!body.due_date)return undefined;var d=new Date(body.due_date);if(isNaN(d))return undefined;return d.toISOString().slice(0,10)})(),
-      CustomerMemo: body.memo ? { value: body.memo } : undefined
+      Line: lineItems
     };
-    Object.keys(invoiceBody).forEach(function(k) { if (invoiceBody[k] === undefined) delete invoiceBody[k]; });
+
+    // Only add optional fields if valid
+    if (body.invoice_number) {
+      invoiceBody.DocNumber = String(body.invoice_number).slice(0, 21);
+    }
+    if (body.due_date) {
+      var dd = new Date(body.due_date);
+      if (!isNaN(dd)) invoiceBody.DueDate = dd.toISOString().slice(0, 10);
+    }
+    if (body.memo) {
+      invoiceBody.CustomerMemo = { value: String(body.memo).slice(0, 1000) };
+    }
 
     var createRes = await fetch(baseUrl + "/invoice", {
       method: "POST", headers: headers,
       body: JSON.stringify(invoiceBody)
     });
-    var createData = await createRes.json();
+    var rawText = await createRes.text();
+    var createData;
+    try { createData = JSON.parse(rawText); } catch(e) {
+      return res.status(400).json({ error: true, detail: "QB returned non-JSON: " + rawText.slice(0, 500) });
+    }
 
     if (createData.Invoice) {
       return res.status(200).json({
@@ -146,9 +167,12 @@ module.exports = async function handler(req, res) {
         total: createData.Invoice.TotalAmt
       });
     }
+
+    // Return FULL QB error for debugging
     return res.status(400).json({
       error: true,
-      detail: createData.Fault ? createData.Fault.Error.map(function(e) { return e.Message }).join("; ") : JSON.stringify(createData)
+      detail: createData.Fault ? createData.Fault.Error.map(function(e) { return e.Message + " | " + (e.Detail || "") }).join("; ") : rawText.slice(0, 1000),
+      sent_payload: invoiceBody
     });
   } catch (e) {
     return res.status(500).json({ error: true, detail: e.message || "Unknown error" });
