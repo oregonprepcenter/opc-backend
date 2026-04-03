@@ -115,42 +115,63 @@ module.exports = async function handler(req, res) {
     }
 
     // 2. Build line items
-    // First, find or create a "Services" item in QB for line items
-    var serviceItemId = null;
+    // Load all service/product items from QB for matching
+    var qbItems = [];
     try {
-      var itemQuery = encodeURIComponent("SELECT * FROM Item WHERE Name = 'Services' AND Type = 'Service'");
-      var itemRes = await fetch(baseUrl + "/query?query=" + itemQuery, { headers: headers });
-      var itemData = await itemRes.json();
-      if (itemData.QueryResponse && itemData.QueryResponse.Item && itemData.QueryResponse.Item.length > 0) {
-        serviceItemId = itemData.QueryResponse.Item[0].Id;
-      } else {
-        // Try to find any service item
-        var anyQuery = encodeURIComponent("SELECT * FROM Item WHERE Type = 'Service' MAXRESULTS 1");
-        var anyRes = await fetch(baseUrl + "/query?query=" + anyQuery, { headers: headers });
-        var anyData = await anyRes.json();
-        if (anyData.QueryResponse && anyData.QueryResponse.Item && anyData.QueryResponse.Item.length > 0) {
-          serviceItemId = anyData.QueryResponse.Item[0].Id;
-        }
+      var allItemsQuery = encodeURIComponent("SELECT * FROM Item WHERE Type IN ('Service','NonInventory') MAXRESULTS 1000");
+      var allItemsRes = await fetch(baseUrl + "/query?query=" + allItemsQuery, { headers: headers });
+      var allItemsData = await allItemsRes.json();
+      if (allItemsData.QueryResponse && allItemsData.QueryResponse.Item) {
+        qbItems = allItemsData.QueryResponse.Item;
       }
     } catch (e) {}
 
-    var lineItems = (body.line_items || []).map(function(item) {
+    // Match function: find QB item by name (fuzzy)
+    function findQBItem(name) {
+      if (!name || qbItems.length === 0) return null;
+      var lower = name.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+      // Exact match first
+      for (var i = 0; i < qbItems.length; i++) {
+        if (qbItems[i].Name.toLowerCase() === lower) return qbItems[i];
+      }
+      // Partial match: QB item name is contained in the line item name or vice versa
+      for (var j = 0; j < qbItems.length; j++) {
+        var qbLower = qbItems[j].Name.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+        if (lower.indexOf(qbLower) >= 0 || qbLower.indexOf(lower) >= 0) return qbItems[j];
+      }
+      // Match on first significant words
+      var nameWords = lower.split(/\s+/).filter(function(w) { return w.length > 2 });
+      for (var k = 0; k < qbItems.length; k++) {
+        var qbWords = qbItems[k].Name.toLowerCase().split(/\s+/);
+        var matchCount = nameWords.filter(function(w) { return qbWords.indexOf(w) >= 0 }).length;
+        if (matchCount >= 2) return qbItems[k];
+      }
+      return null;
+    }
+
+    var lineItems = [];
+    for (var li = 0; li < (body.line_items || []).length; li++) {
+      var item = body.line_items[li];
       var amt = Math.round((item.amount || (item.qty * item.price) || 0) * 100) / 100;
-      var line = {
-        DetailType: "SalesItemLineDetail",
-        Amount: amt,
-        Description: item.description || item.name || ""
-      };
+      var searchName = item.qbItem || item.name || item.description || "";
+
+      // Try to find matching QB product/service
+      var matched = findQBItem(searchName);
+
       var detail = {
         UnitPrice: Math.round((item.price || 0) * 100) / 100,
         Qty: item.qty || 1
       };
-      if (serviceItemId) {
-        detail.ItemRef = { value: String(serviceItemId) };
+      if (matched) {
+        detail.ItemRef = { value: String(matched.Id), name: matched.Name };
       }
-      line.SalesItemLineDetail = detail;
-      return line;
-    });
+      lineItems.push({
+        DetailType: "SalesItemLineDetail",
+        Amount: amt,
+        Description: item.description || item.name || "",
+        SalesItemLineDetail: detail
+      });
+    }
     if (lineItems.length === 0) {
       lineItems = [{ DetailType: "SalesItemLineDetail", Amount: 0, Description: "Service", SalesItemLineDetail: { Qty: 1, UnitPrice: 0 } }];
     }
