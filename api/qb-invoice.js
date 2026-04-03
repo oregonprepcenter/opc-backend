@@ -10,6 +10,33 @@ module.exports = async function handler(req, res) {
   var realmId = body.realm_id;
   var action = body.action || "create"; // "create", "check_payments", "void"
 
+  // === ACTION: REFRESH TOKEN (doesn't need access_token/realmId) ===
+  if (action === "refresh") {
+    var refreshToken = body.refresh_token;
+    if (!refreshToken) return res.status(400).json({ error: true, detail: "Missing refresh_token" });
+    var clientId = process.env.QBO_CLIENT_ID;
+    var clientSecret = process.env.QBO_CLIENT_SECRET;
+    if (!clientId || !clientSecret) return res.status(500).json({ error: true, detail: "Missing QB credentials on server" });
+    try {
+      var tokenRes = await fetch("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer", {
+        method: "POST",
+        headers: {
+          "Authorization": "Basic " + Buffer.from(clientId + ":" + clientSecret).toString("base64"),
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json"
+        },
+        body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(refreshToken)
+      });
+      var tokenData = await tokenRes.json();
+      if (tokenData.access_token) {
+        return res.status(200).json({ success: true, access_token: tokenData.access_token, refresh_token: tokenData.refresh_token || refreshToken });
+      }
+      return res.status(400).json({ error: true, detail: "Token refresh failed: " + JSON.stringify(tokenData) });
+    } catch (e) {
+      return res.status(500).json({ error: true, detail: e.message });
+    }
+  }
+
   if (!accessToken || !realmId) {
     return res.status(400).json({ error: true, detail: "Missing access_token or realm_id" });
   }
